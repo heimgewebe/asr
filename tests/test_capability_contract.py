@@ -49,3 +49,9 @@ def test_runbook_uses_generic_authority_contract() -> None:
     assert "heim_pc_asr_open_engine" not in runbook
     assert "manifest/asr-capability.v1.json" in runbook
     assert "manifest/operator-entry.v1.json" not in runbook
+
+
+def test_golden_privacy_docs_bind_generic_asr_repository() -> None:
+    architecture = (ROOT / "architecture/asr-golden-corpus.md").read_text(encoding="utf-8")
+    assert "innerhalb des ASR-Repositories" in architecture
+    assert "innerhalb des Heim-PC-Repositories" not in architecture
