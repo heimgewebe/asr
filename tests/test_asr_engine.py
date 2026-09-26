@@ -440,7 +440,11 @@ def test_run_inference_faster_whisper_uses_policy_model(tmp_path, monkeypatch):
 
 def test_qwen_cache_requires_all_indexed_shards(tmp_path, monkeypatch):
     hub = tmp_path / "hub"
-    snapshot = hub / "models--Qwen--Qwen3-ASR-1.7B" / "snapshots" / "rev"
+    cache_key = asr_engine._hf_model_cache_key(
+        asr_engine.load_policy()["engines"]["qwen"]["model"]
+    )
+    assert cache_key is not None
+    snapshot = hub / cache_key / "snapshots" / "rev"
     snapshot.mkdir(parents=True)
     (snapshot / "config.json").write_text("{}", encoding="utf-8")
     (snapshot / "model.safetensors.index.json").write_text(
@@ -456,13 +460,36 @@ def test_qwen_cache_requires_all_indexed_shards(tmp_path, monkeypatch):
 
 def test_faster_whisper_cache_requires_model_and_metadata(tmp_path, monkeypatch):
     root = tmp_path / "fw"
-    snapshot = root / "models--Systran--faster-whisper-large-v3" / "snapshots" / "rev"
+    policy = asr_engine.load_policy()
+    cache_key = asr_engine._hf_model_cache_key(
+        policy["engines"]["faster-whisper"]["model"]
+    )
+    assert cache_key is not None
+    snapshot = root / cache_key / "snapshots" / "rev"
     snapshot.mkdir(parents=True)
     (snapshot / "config.json").write_text("{}", encoding="utf-8")
     (snapshot / "tokenizer.json").write_text("{}", encoding="utf-8")
     monkeypatch.setattr(asr_engine, "FASTER_WHISPER_MODEL_DIR", root)
     assert asr_engine.model_cache_ready("faster-whisper") is False
     (snapshot / "model.bin").write_bytes(b"model")
+    assert asr_engine.model_cache_ready("faster-whisper") is True
+
+
+def test_faster_whisper_cache_identity_follows_policy_model(tmp_path, monkeypatch):
+    root = tmp_path / "fw"
+    policy = json.loads(json.dumps(asr_engine.load_policy()))
+    policy["engines"]["faster-whisper"]["model"] = "ReviewedOrg/reviewed-whisper"
+    monkeypatch.setattr(asr_engine, "load_policy", lambda: policy)
+    monkeypatch.setattr(asr_engine, "FASTER_WHISPER_MODEL_DIR", root)
+    snapshot = (
+        root
+        / "models--ReviewedOrg--reviewed-whisper"
+        / "snapshots"
+        / "rev"
+    )
+    snapshot.mkdir(parents=True)
+    for name in ("model.bin", "config.json", "tokenizer.json"):
+        (snapshot / name).write_bytes(b"x")
     assert asr_engine.model_cache_ready("faster-whisper") is True
 
 
@@ -486,7 +513,9 @@ def test_parakeet_cache_requires_exact_revision_and_core_files(tmp_path, monkeyp
     policy = asr_engine.load_policy()
     revision = policy["engines"]["parakeet"]["model_revision"]
     hub = tmp_path / "hub"
-    snapshot = hub / "models--nvidia--parakeet-tdt-0.6b-v3" / "snapshots" / revision
+    cache_key = asr_engine._hf_model_cache_key(policy["engines"]["parakeet"]["model"])
+    assert cache_key is not None
+    snapshot = hub / cache_key / "snapshots" / revision
     snapshot.mkdir(parents=True)
     monkeypatch.setattr(asr_engine, "HF_HUB_CACHE_DIR", hub)
     for name in ("config.json", "model.safetensors", "processor_config.json"):

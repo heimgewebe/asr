@@ -396,35 +396,41 @@ def _parakeet_snapshot_complete(snapshot: Path) -> bool:
     return all((snapshot / name).is_file() for name in required)
 
 
+def _hf_model_cache_key(model: Any) -> str | None:
+    if not isinstance(model, str) or model.count("/") != 1 or "\\" in model:
+        return None
+    namespace, name = model.split("/", 1)
+    if (
+        not namespace
+        or not name
+        or namespace in {".", ".."}
+        or name in {".", ".."}
+    ):
+        return None
+    return f"models--{namespace}--{name}"
+
+
 def model_cache_ready(engine_name: str) -> bool:
+    if engine_name not in {"qwen", "faster-whisper", "parakeet"}:
+        return False
+    engine_conf = get_engine(load_policy(), engine_name)
+    cache_key = _hf_model_cache_key(engine_conf.get("model"))
+    if cache_key is None:
+        return False
+
     if engine_name == "qwen":
-        snapshots = (
-            HF_HUB_CACHE_DIR
-            / "models--Qwen--Qwen3-ASR-1.7B"
-            / "snapshots"
-        )
+        snapshots = HF_HUB_CACHE_DIR / cache_key / "snapshots"
         validator = _qwen_snapshot_complete
     elif engine_name == "faster-whisper":
-        snapshots = (
-            FASTER_WHISPER_MODEL_DIR
-            / "models--Systran--faster-whisper-large-v3"
-            / "snapshots"
-        )
+        snapshots = FASTER_WHISPER_MODEL_DIR / cache_key / "snapshots"
         validator = _faster_whisper_snapshot_complete
-    elif engine_name == "parakeet":
-        engine_conf = get_engine(load_policy(), engine_name)
+    else:
         revision = engine_conf.get("model_revision")
         if not isinstance(revision, str) or len(revision) != 40:
             return False
-        snapshot = (
-            HF_HUB_CACHE_DIR
-            / "models--nvidia--parakeet-tdt-0.6b-v3"
-            / "snapshots"
-            / revision
-        )
+        snapshot = HF_HUB_CACHE_DIR / cache_key / "snapshots" / revision
         return snapshot.is_dir() and _parakeet_snapshot_complete(snapshot)
-    else:
-        return False
+
     if not snapshots.is_dir():
         return False
     return any(path.is_dir() and validator(path) for path in snapshots.iterdir())
