@@ -9,7 +9,7 @@ operational_runbook:
     platforms: [linux]
     components: [asr, audio]
   symptoms: [transcription-route-unknown, canonical-asr-runtime-missing, duplicated-model-cache, per-request-venv]
-  evidence_refs: [architecture/asr-engine.md, manifest/operator-entry.v1.json, manifest/asr-engine-policy.v1.json, scripts/asr_engine.py]
+  evidence_refs: [architecture/asr-engine.md, architecture/authority-boundary.md, manifest/asr-capability.v1.json, manifest/asr-engine-policy.v1.json, scripts/asr_engine.py]
   verified_against:
     - repository: heimgewebe/asr
       commit: ac514e37ef24b594aa51a7c2157ae94f4ab94ace
@@ -40,7 +40,7 @@ Vor dem host-local Schritt zuerst eine bereits veröffentlichte native typed Gra
 Erwartete stabile Semantik der Auflösung:
 
 - Capability: `audioTranscription`
-- Autorität: `heim_pc_asr_open_engine`
+- Autorität: `heimgewebe_asr_open_engine`
 - kanonischer Einstieg: `python3 ${HOME}/repos/asr/scripts/asr_engine.py`
 - Default-Operation: `transcribe`
 - Readiness-Operation: `doctor`

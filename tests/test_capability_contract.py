@@ -41,3 +41,11 @@ def test_capability_contract_binds_authority_and_wire_contracts() -> None:
     assert transcript_path.is_file()
     assert policy_path.is_file()
     assert golden_path.is_file()
+
+
+def test_runbook_uses_generic_authority_contract() -> None:
+    runbook = (ROOT / "runbooks/asr-local-transcription.md").read_text(encoding="utf-8")
+    assert "heimgewebe_asr_open_engine" in runbook
+    assert "heim_pc_asr_open_engine" not in runbook
+    assert "manifest/asr-capability.v1.json" in runbook
+    assert "manifest/operator-entry.v1.json" not in runbook

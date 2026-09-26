@@ -260,6 +260,70 @@ def test_doctor_is_read_only(monkeypatch):
         run.assert_not_called()
 
 
+def test_doctor_checks_only_engine_inference_tools(monkeypatch):
+    observed: list[str] = []
+
+    def which(tool: str) -> str | None:
+        observed.append(tool)
+        return f"/usr/bin/{tool}" if tool == "ffmpeg" else None
+
+    monkeypatch.setattr(asr_engine.shutil, "which", which)
+    monkeypatch.setattr(asr_engine, "package_probe", lambda _engine: (True, "pinned"))
+    monkeypatch.setattr(asr_engine, "model_cache_ready", lambda _engine: True)
+
+    assert asr_engine.cmd_doctor(Namespace(engine="qwen")) is True
+    assert observed == ["ffmpeg"]
+
+    observed.clear()
+    assert asr_engine.cmd_doctor(Namespace(engine="parakeet")) is True
+    assert observed == ["ffmpeg"]
+
+    observed.clear()
+    assert asr_engine.cmd_doctor(Namespace(engine="faster-whisper")) is True
+    assert observed == []
+
+
+@pytest.mark.parametrize(
+    ("engine", "distribution", "version"),
+    [
+        ("qwen", "qwen-asr", "0.0.6"),
+        ("faster-whisper", "faster-whisper", "1.2.1"),
+        ("parakeet", "transformers", "5.15.0"),
+    ],
+)
+def test_package_pin_is_derived_from_policy(
+    engine: str,
+    distribution: str,
+    version: str,
+) -> None:
+    conf = asr_engine.load_policy()["engines"][engine]
+    assert asr_engine._package_pin(conf) == (distribution, version)
+
+
+@pytest.mark.parametrize("engine", ["qwen", "faster-whisper", "parakeet"])
+def test_package_probe_rejects_version_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    engine: str,
+) -> None:
+    venv = tmp_path / engine
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").write_text("", encoding="utf-8")
+    monkeypatch.setattr(asr_engine, "get_venv_path", lambda name: tmp_path / name)
+    monkeypatch.setattr(
+        asr_engine.subprocess,
+        "run",
+        lambda argv, **kwargs: asr_engine.subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout="999.0\n",
+            stderr="",
+        ),
+    )
+
+    assert asr_engine.package_probe(engine) == (False, "package-version-mismatch")
+
+
 def test_setup_is_explicit_and_uses_isolated_qwen_package(tmp_path, monkeypatch):
     cache = tmp_path / "cache"
     monkeypatch.setattr(asr_engine, "CACHE_DIR", cache)
@@ -856,6 +920,53 @@ def test_golden_default_review_prefers_lexical_wer_without_auto_mutation(tmp_pat
     assert evidence["default_review_metric"] == "mean_lexical_wer"
     assert evidence["eligible_for_default_review"] is True
     assert evidence["automatic_default_change_allowed"] is False
+
+
+@pytest.mark.parametrize(
+    "engines",
+    [
+        ["qwen"],
+        ["qwen", "parakeet"],
+    ],
+)
+def test_golden_default_review_requires_current_default_comparison(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    engines: list[str],
+) -> None:
+    corpus = tmp_path / "full-corpus"
+    corpus.mkdir()
+    manifest = _write_golden_manifest(corpus, 20)
+    monkeypatch.setattr(asr_engine, "get_repo_head", lambda: "a" * 40)
+    monkeypatch.setattr(asr_engine, "get_repo_dirty", lambda: False)
+    monkeypatch.setattr(asr_engine, "policy_sha256", lambda: "b" * 64)
+
+    def measurement(engine, _audio, _reference):
+        return {
+            "outcome": "success",
+            "model": engine,
+            "model_revision": None,
+            "backend_version": "test",
+            "detected_language": "de",
+            "metric_schema_version": 2,
+            "wer": 0.1,
+            "cer": 0.05,
+            "lexical_wer": 0.08,
+            "lexical_cer": 0.04,
+            "wall_time_seconds": 0.1,
+            "rtf": 0.1,
+            "gpu_memory_used_peak_mib_observed": 100,
+        }
+
+    monkeypatch.setattr(asr_engine, "_golden_engine_measurement", measurement)
+    evidence = asr_engine.run_golden_benchmark(manifest, engines)
+
+    assert evidence["quality_gate_eligible"] is True
+    assert evidence["all_measurements_complete"] is True
+    assert evidence["current_default_engine"] == "faster-whisper"
+    assert evidence["best_local_engine_by_mean_wer"] is None
+    assert evidence["best_local_engine_by_mean_lexical_wer"] is None
+    assert evidence["eligible_for_default_review"] is False
 
 
 def test_parser_exposes_cloud_only_as_explicit_flags():

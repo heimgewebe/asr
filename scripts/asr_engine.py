@@ -420,26 +420,57 @@ def model_cache_ready(engine_name: str) -> bool:
     return any(path.is_dir() and validator(path) for path in snapshots.iterdir())
 
 
+def _package_pin(engine_conf: dict[str, Any]) -> tuple[str, str] | None:
+    package = engine_conf.get("package")
+    if not isinstance(package, str) or package.count("==") != 1:
+        return None
+    requirement, expected_version = package.rsplit("==", 1)
+    distribution = engine_conf.get("package_distribution")
+    if distribution is None:
+        distribution = requirement.split("[", 1)[0]
+    if (
+        not isinstance(distribution, str)
+        or not distribution
+        or not expected_version
+    ):
+        return None
+    return distribution, expected_version
+
+
+def _inference_tools(engine_name: str) -> tuple[str, ...]:
+    tools = {
+        "qwen": ("ffmpeg",),
+        "faster-whisper": (),
+        "parakeet": ("ffmpeg",),
+    }
+    try:
+        return tools[engine_name]
+    except KeyError as exc:
+        raise ValueError(f"No inference tool contract for {engine_name}") from exc
+
+
 def package_probe(engine_name: str) -> tuple[bool, str]:
     venv_python = get_venv_path(engine_name) / "bin" / "python"
     if not venv_python.is_file():
         return False, "venv-missing"
+    engine_conf = get_engine(load_policy(), engine_name)
+    package_pin = _package_pin(engine_conf)
+    if package_pin is None:
+        return False, "package-pin-invalid"
+    distribution, expected_version = package_pin
     if engine_name == "qwen":
-        distribution = "qwen-asr"
         code = (
             "import importlib.metadata as m; import qwen_asr; import torch; "
             "assert torch.cuda.is_available(), 'torch-cuda-unavailable'; "
             f"print(m.version('{distribution}'))"
         )
     elif engine_name == "faster-whisper":
-        distribution = "faster-whisper"
         code = (
             "import importlib.metadata as m; import faster_whisper; import ctranslate2; "
             "assert ctranslate2.get_cuda_device_count() > 0, 'ctranslate2-cuda-unavailable'; "
             f"print(m.version('{distribution}'))"
         )
     elif engine_name == "parakeet":
-        distribution = "transformers"
         code = (
             "import importlib.metadata as m; import librosa; import torch; "
             "from transformers import AutoModelForTDT, AutoProcessor; "
@@ -458,8 +489,7 @@ def package_probe(engine_name: str) -> tuple[bool, str]:
     if result.returncode != 0:
         return False, "package-or-cuda-probe-failed"
     observed_version = result.stdout.strip()
-    expected_version = get_engine(load_policy(), engine_name).get("package_version")
-    if isinstance(expected_version, str) and observed_version != expected_version:
+    if observed_version != expected_version:
         return False, "package-version-mismatch"
     return True, observed_version
 
@@ -471,7 +501,7 @@ def cmd_doctor(args: argparse.Namespace) -> bool:
     check_runnable(engine_conf, engine_name)
 
     ok = True
-    for tool in ("ffmpeg", "ffprobe", "python3", "uv", "nvidia-smi"):
+    for tool in _inference_tools(engine_name):
         present = shutil.which(tool) is not None
         logging.info("%s %s", "[OK]" if present else "[MISSING]", tool)
         ok = ok and present
@@ -1379,9 +1409,14 @@ def run_golden_benchmark(
         aggregates.get(engine, {}).get("success_count") == len(samples)
         for engine in unique_engines
     )
+    current_default = load_policy()["default_engine"]
+    default_comparison_complete = (
+        current_default in unique_engines
+        and any(engine != current_default for engine in unique_engines)
+    )
     best_strict = None
     best_lexical = None
-    if summary["quality_gate_eligible"] and complete:
+    if summary["quality_gate_eligible"] and complete and default_comparison_complete:
         best_strict = min(unique_engines, key=lambda name: aggregates[name]["mean_wer"])
         best_lexical = min(
             unique_engines, key=lambda name: aggregates[name]["mean_lexical_wer"]
@@ -1401,7 +1436,7 @@ def run_golden_benchmark(
         "engines": unique_engines,
         "aggregates": aggregates,
         "samples": samples,
-        "current_default_engine": load_policy()["default_engine"],
+        "current_default_engine": current_default,
         "metric_schema_version": 2,
         "default_review_metric": "mean_lexical_wer",
         "best_local_engine_by_mean_wer": best_strict,
