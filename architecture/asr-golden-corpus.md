@@ -35,7 +35,7 @@ Der Korpus selbst ist **privat und repo-extern**. In Git oder Bureau dürfen wed
 }
 ```
 
-`audio` und `reference` werden relativ zum privaten Manifest aufgelöst. Das Tool lehnt Manifest, Audio oder Referenz innerhalb des Heim-PC-Repositories ab. `reference_kind` muss `human-corrected` sein; ein maschinell erzeugtes Transkript ist keine Ground Truth.
+`audio` und `reference` werden relativ zum privaten Manifest aufgelöst. Das Tool lehnt Manifest, Audio oder Referenz innerhalb des ASR-Repositories ab. `reference_kind` muss `human-corrected` sein; ein maschinell erzeugtes Transkript ist keine Ground Truth.
 
 ## Qualitätsabdeckung
 
