@@ -28,7 +28,6 @@ CACHE_DIR = Path.home() / ".local" / "cache" / "heimgewebe" / "asr"
 HF_HOME_DIR = CACHE_DIR / "hf_home"
 HF_HUB_CACHE_DIR = HF_HOME_DIR / "hub"
 FASTER_WHISPER_MODEL_DIR = CACHE_DIR / "fw_models"
-FASTER_WHISPER_SIZE = "large-v3"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
@@ -268,10 +267,21 @@ def get_venv_path(engine_name: str) -> Path:
 
 def backend_env(*, offline: bool) -> dict[str, str]:
     env = os.environ.copy()
+    for key in (
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "COHERE_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GROQ_API_KEY",
+    ):
+        env.pop(key, None)
     env["HF_HOME"] = str(HF_HOME_DIR)
     env["HF_HUB_CACHE"] = str(HF_HUB_CACHE_DIR)
     env["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
     if offline:
+        env.pop("HF_TOKEN", None)
+        env.pop("HUGGING_FACE_HUB_TOKEN", None)
         env["HF_HUB_OFFLINE"] = "1"
         env["TRANSFORMERS_OFFLINE"] = "1"
     else:
@@ -584,7 +594,13 @@ def cmd_setup(args: argparse.Namespace) -> None:
             "download_root=sys.argv[2])"
         )
         subprocess.run(
-            [python_exec, "-c", download_code, FASTER_WHISPER_SIZE, str(FASTER_WHISPER_MODEL_DIR)],
+            [
+                python_exec,
+                "-c",
+                download_code,
+                engine_conf["model"],
+                str(FASTER_WHISPER_MODEL_DIR),
+            ],
             env=env,
             check=True,
         )
@@ -677,10 +693,10 @@ import sys
 from faster_whisper import WhisperModel
 
 model = WhisperModel(
-    "large-v3",
+    sys.argv[2],
     device="cuda",
     compute_type="float16",
-    download_root=sys.argv[2],
+    download_root=sys.argv[3],
     local_files_only=True,
 )
 segments, info = model.transcribe(
@@ -812,6 +828,7 @@ def run_inference(
             "-c",
             FASTER_WHISPER_CHILD,
             str(audio_path),
+            engine_conf["model"],
             str(FASTER_WHISPER_MODEL_DIR),
         ]
     elif engine_name == "parakeet":
@@ -963,24 +980,16 @@ def route_transcription(
     audio_path: Path,
     *,
     strategy: str = "local-first",
-    primary_engine: str | None = None,
-    secondary_engine: str | None = None,
-    disagreement_threshold: float | None = None,
-    cloud_model: str | None = None,
     escalate_to_cloud: bool = False,
     allow_metered_cloud: bool = False,
 ) -> dict[str, Any]:
     policy = load_policy()
     routing = policy["routing"]
-    primary = primary_engine or routing["default_local_engine"]
+    primary = routing["default_local_engine"]
     fallback = routing["local_fallback_engine"]
-    secondary = secondary_engine or routing["dual_local_default_secondary"]
-    threshold = (
-        float(disagreement_threshold)
-        if disagreement_threshold is not None
-        else float(routing["dual_local_disagreement_threshold"])
-    )
-    cloud_name = cloud_model or routing["default_cloud_model"]
+    secondary = routing["dual_local_default_secondary"]
+    threshold = float(routing["dual_local_disagreement_threshold"])
+    cloud_name = routing["default_cloud_model"]
     if threshold < 0 or threshold > 1:
         raise ValueError("disagreement threshold must be between 0 and 1")
 
@@ -1233,6 +1242,7 @@ def load_private_golden_manifest(
         raise ValueError("Golden corpus manifest requires at least one item")
     allowed_categories = set(contract["required_quality_categories"])
     seen_ids: set[str] = set()
+    seen_audio_digests: set[str] = set()
     normalized: list[dict[str, Any]] = []
     for item in items:
         if not isinstance(item, dict):
@@ -1268,6 +1278,10 @@ def load_private_golden_manifest(
             )
         if not audio.is_file() or not reference.is_file():
             raise ValueError("Golden corpus media/reference must be regular files")
+        audio_digest = file_sha256(audio)
+        if audio_digest in seen_audio_digests:
+            raise ValueError("Golden corpus contains duplicate audio content")
+        seen_audio_digests.add(audio_digest)
         normalized.append(
             {
                 "id": item_id,
@@ -1496,11 +1510,7 @@ def cmd_transcribe(args: argparse.Namespace) -> None:
         result = route_transcription(audio_path, strategy="local-first")["selected"]
         print(result["text"])
         return
-    policy = load_policy()
-    engine_name = args.engine
-    engine_conf = get_engine(policy, engine_name)
-    check_runnable(engine_conf, engine_name)
-    result = run_inference(engine_name, engine_conf, audio_path)
+    result = run_local_transcription(args.engine, audio_path)
     print(result["text"])
 
 
@@ -1509,10 +1519,6 @@ def cmd_route(args: argparse.Namespace) -> None:
     result = route_transcription(
         audio_path,
         strategy=args.strategy,
-        primary_engine=args.primary,
-        secondary_engine=args.secondary,
-        disagreement_threshold=args.disagreement_threshold,
-        cloud_model=args.cloud_model,
         escalate_to_cloud=args.escalate_to_cloud,
         allow_metered_cloud=args.allow_metered_cloud,
     )
@@ -1532,6 +1538,8 @@ def cmd_benchmark(args: argparse.Namespace) -> None:
     engine_conf = get_engine(policy, engine_name)
     check_runnable(engine_conf, engine_name)
     audio_path = args.audio.expanduser().resolve(strict=True)
+    if _path_is_within_repo(audio_path):
+        raise ValueError("Benchmark private media must remain outside the repository")
     audio_digest = file_sha256(audio_path)
     duration = get_audio_duration(audio_path)
     evidence: dict[str, Any] = {
@@ -1569,6 +1577,10 @@ def cmd_benchmark(args: argparse.Namespace) -> None:
         )
         if args.reference is not None:
             reference_path = args.reference.expanduser().resolve(strict=True)
+            if _path_is_within_repo(reference_path):
+                raise ValueError(
+                    "Benchmark private reference must remain outside the repository"
+                )
             reference = reference_path.read_text(encoding="utf-8")
             evidence["reference_digest"] = file_sha256(reference_path)
             evidence["wer"], evidence["cer"] = compute_wer_cer(
@@ -1598,12 +1610,6 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     local_choices = ("qwen", "faster-whisper", "parakeet")
-    cloud_choices = (
-        "gpt-4o-transcribe",
-        "gpt-4o-mini-transcribe",
-        "gpt-4o-transcribe-diarize",
-    )
-
     doctor = subparsers.add_parser("doctor", help="Read-only local ASR readiness check")
     doctor.add_argument("--engine", choices=local_choices)
 
@@ -1624,10 +1630,6 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("local-first", "dual-local", "cloud"),
         default="local-first",
     )
-    route.add_argument("--primary", choices=local_choices)
-    route.add_argument("--secondary", choices=local_choices)
-    route.add_argument("--disagreement-threshold", type=float)
-    route.add_argument("--cloud-model", choices=cloud_choices)
     route.add_argument("--escalate-to-cloud", action="store_true")
     route.add_argument("--allow-metered-cloud", action="store_true")
     route.add_argument("--json", action="store_true")

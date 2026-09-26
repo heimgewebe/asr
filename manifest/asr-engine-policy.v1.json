@@ -163,7 +163,8 @@
       "features": {
         "language_detection": true,
         "timestamps": false,
-        "diarization": false
+        "diarization": false,
+        "language_detection_in_current_adapter": false
       }
     },
     "gpt-4o-mini-transcribe": {
@@ -178,7 +179,8 @@
       "features": {
         "language_detection": true,
         "timestamps": false,
-        "diarization": false
+        "diarization": false,
+        "language_detection_in_current_adapter": false
       }
     },
     "gpt-4o-transcribe-diarize": {

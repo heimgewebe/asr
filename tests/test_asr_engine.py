@@ -54,6 +54,13 @@ def test_policy_contract_and_default():
     assert parakeet["role"] == "speed-low-vram-comparator"
     assert parakeet["features"]["language_detection_in_current_adapter"] is False
     assert policy["engines"]["moss"]["remote_code_risk"] is True
+    for cloud_name in ("gpt-4o-transcribe", "gpt-4o-mini-transcribe"):
+        assert (
+            policy["cloud_engines"][cloud_name]["features"][
+                "language_detection_in_current_adapter"
+            ]
+            is False
+        )
 
     cohere = policy["engines"]["cohere"]
     assert cohere["model"] == "CohereLabs/cohere-transcribe-03-2026"
@@ -183,6 +190,16 @@ def test_benchmark_success_persists_metrics_not_text(tmp_path, monkeypatch):
     assert "reference_text" not in evidence
 
 
+def test_benchmark_rejects_private_inputs_inside_repository(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    audio = repo / "audio.wav"
+    audio.write_bytes(b"audio")
+    monkeypatch.setattr(asr_engine, "REPO_ROOT", repo)
+    with pytest.raises(ValueError, match="must remain outside"):
+        asr_engine.cmd_benchmark(Namespace(engine="qwen", audio=audio, reference=None))
+
+
 def test_benchmark_failure_writes_evidence_and_exits_nonzero_semantics(tmp_path, monkeypatch):
     monkeypatch.setattr(asr_engine, "STATE_DIR", tmp_path / "state")
     audio = tmp_path / "audio.wav"
@@ -229,6 +246,22 @@ def test_transcribe_outputs_only_to_stdout(tmp_path, monkeypatch, capsys):
     assert not state.exists()
 
 
+
+
+def test_explicit_transcribe_validates_backend_payload(tmp_path, monkeypatch):
+    audio = tmp_path / "audio.wav"
+    audio.write_bytes(b"audio")
+    monkeypatch.setattr(
+        asr_engine,
+        "run_inference",
+        lambda *_args: {
+            "text": 123,
+            "language": "de",
+            "version": "0.0.6",
+        },
+    )
+    with pytest.raises(asr_engine.BackendError, match="no transcript text"):
+        asr_engine.cmd_transcribe(Namespace(engine="qwen", audio=audio))
 
 
 def test_default_transcribe_uses_local_first_route(tmp_path, monkeypatch, capsys):
@@ -344,6 +377,18 @@ def test_setup_is_explicit_and_uses_isolated_qwen_package(tmp_path, monkeypatch)
     )
 
 
+def test_backend_env_strips_cloud_credentials_from_local_children(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "cloud-secret")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "other-cloud-secret")
+    monkeypatch.setenv("HF_TOKEN", "hf-secret")
+    env = asr_engine.backend_env(offline=True)
+    assert "OPENAI_API_KEY" not in env
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "HF_TOKEN" not in env
+    assert env["HF_HUB_OFFLINE"] == "1"
+    assert env["TRANSFORMERS_OFFLINE"] == "1"
+
+
 def test_run_inference_forces_offline_mode(tmp_path, monkeypatch):
     cache = tmp_path / "cache"
     venv = cache / "venv_qwen" / "bin"
@@ -370,6 +415,27 @@ def test_run_inference_forces_offline_mode(tmp_path, monkeypatch):
     assert observed["env"]["HF_HUB_OFFLINE"] == "1"
     assert observed["env"]["TRANSFORMERS_OFFLINE"] == "1"
     assert "Qwen3ASRModel.from_pretrained" in observed["argv"][2]
+
+
+def test_run_inference_faster_whisper_uses_policy_model(tmp_path, monkeypatch):
+    cache = tmp_path / "cache"
+    venv = cache / "venv_faster-whisper" / "bin"
+    venv.mkdir(parents=True)
+    (venv / "python").write_text("", encoding="utf-8")
+    monkeypatch.setattr(asr_engine, "CACHE_DIR", cache)
+    monkeypatch.setattr(asr_engine, "FASTER_WHISPER_MODEL_DIR", cache / "fw_models")
+    monkeypatch.setattr(asr_engine, "model_cache_ready", lambda _engine: True)
+    observed = {}
+
+    def child(argv, env):
+        observed["argv"] = argv
+        return 0, json.dumps({"text": "x", "language": "de", "version": "1.2.1"}), "", 128
+
+    monkeypatch.setattr(asr_engine, "run_child_with_gpu_observation", child)
+    conf = asr_engine.load_policy()["engines"]["faster-whisper"]
+    asr_engine.run_inference("faster-whisper", conf, tmp_path / "a.wav")
+    assert conf["model"] in observed["argv"]
+    assert observed["argv"][4] == conf["model"]
 
 
 def test_qwen_cache_requires_all_indexed_shards(tmp_path, monkeypatch):
@@ -428,6 +494,25 @@ def test_parakeet_cache_requires_exact_revision_and_core_files(tmp_path, monkeyp
     assert asr_engine.model_cache_ready("parakeet") is False
     (snapshot / "tokenizer.json").write_bytes(b"x")
     assert asr_engine.model_cache_ready("parakeet") is True
+
+
+def test_setup_faster_whisper_uses_policy_model(tmp_path, monkeypatch):
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(asr_engine, "CACHE_DIR", cache)
+    monkeypatch.setattr(asr_engine, "HF_HOME_DIR", cache / "hf_home")
+    monkeypatch.setattr(asr_engine, "HF_HUB_CACHE_DIR", cache / "hf_home" / "hub")
+    monkeypatch.setattr(asr_engine, "FASTER_WHISPER_MODEL_DIR", cache / "fw_models")
+    monkeypatch.setattr(asr_engine.shutil, "which", lambda _tool: "/usr/bin/uv")
+    monkeypatch.setattr(asr_engine, "package_probe", lambda _engine: (True, "1.2.1"))
+    monkeypatch.setattr(asr_engine, "model_cache_ready", lambda _engine: True)
+    with patch.object(asr_engine.subprocess, "run") as run:
+        asr_engine.cmd_setup(Namespace(engine="faster-whisper"))
+    download = next(
+        command
+        for command in (call.args[0] for call in run.call_args_list)
+        if len(command) > 2 and command[1] == "-c" and "WhisperModel" in command[2]
+    )
+    assert asr_engine.load_policy()["engines"]["faster-whisper"]["model"] in download
 
 
 def test_setup_parakeet_pins_package_and_model_revision(tmp_path, monkeypatch):
@@ -604,6 +689,8 @@ def test_normalized_result_does_not_invent_unsupported_metadata():
 
 def test_faster_whisper_child_exports_real_segment_timestamps():
     source = asr_engine.FASTER_WHISPER_CHILD
+    assert '"large-v3"' not in source
+    assert "sys.argv[2]" in source
     assert "segment_items" in source
     assert '"start": float(segment.start)' in source
     assert '"end": float(segment.end)' in source
@@ -755,14 +842,74 @@ def test_dual_local_disagreement_only_recommends_cloud(tmp_path, monkeypatch):
 
     monkeypatch.setattr(asr_engine, "run_local_transcription", local)
     with patch.object(asr_engine, "run_openai_transcription") as cloud:
-        result = asr_engine.route_transcription(
-            audio, strategy="dual-local", disagreement_threshold=0.1
-        )
+        result = asr_engine.route_transcription(audio, strategy="dual-local")
     assert result["cloud_recommended"] is True
     assert result["cloud_used"] is False
     assert result["selected"]["engine"] == "faster-whisper"
     cloud.assert_not_called()
 
+
+
+def test_route_cloud_without_metered_opt_in_never_reaches_network(
+    tmp_path, monkeypatch
+):
+    audio = tmp_path / "a.wav"
+    audio.write_bytes(b"audio")
+    args = asr_engine.build_parser().parse_args(
+        ["route", "--audio", str(audio), "--strategy", "cloud", "--json"]
+    )
+    with patch.object(asr_engine.urllib.request, "urlopen") as urlopen:
+        with pytest.raises(
+            asr_engine.CloudCostAuthorizationError, match="allow-metered-cloud"
+        ):
+            asr_engine.cmd_route(args)
+        urlopen.assert_not_called()
+
+
+def test_route_both_local_failures_fail_closed_without_cloud(tmp_path, monkeypatch):
+    audio = tmp_path / "a.wav"
+    audio.write_bytes(b"audio")
+    monkeypatch.setattr(
+        asr_engine,
+        "run_local_transcription",
+        lambda *_args: (_ for _ in ()).throw(asr_engine.BackendError("local failed")),
+    )
+    with patch.object(asr_engine, "run_openai_transcription") as cloud:
+        with pytest.raises(
+            asr_engine.BackendError,
+            match="Primary and local fallback ASR engines both failed",
+        ):
+            asr_engine.route_transcription(audio)
+        cloud.assert_not_called()
+
+
+def test_route_local_failures_can_escalate_only_with_explicit_authorization(
+    tmp_path, monkeypatch
+):
+    audio = tmp_path / "a.wav"
+    audio.write_bytes(b"audio")
+    monkeypatch.setattr(
+        asr_engine,
+        "run_local_transcription",
+        lambda *_args: (_ for _ in ()).throw(asr_engine.BackendError("local failed")),
+    )
+    cloud_result = _transcript("gpt-4o-transcribe", "cloud result")
+    monkeypatch.setattr(
+        asr_engine, "run_openai_transcription", lambda *_args, **_kwargs: cloud_result
+    )
+    result = asr_engine.route_transcription(
+        audio, escalate_to_cloud=True, allow_metered_cloud=True
+    )
+    assert result["selected"] == cloud_result
+    assert result["local_failure_escalated"] is True
+    assert result["cloud_used"] is True
+
+
+def test_route_parser_exposes_no_consumer_routing_pins():
+    parser = asr_engine.build_parser()
+    for option in ("--primary", "--secondary", "--disagreement-threshold", "--cloud-model"):
+        with pytest.raises(SystemExit):
+            parser.parse_args(["route", "--audio", "/tmp/a.wav", option, "x"])
 
 
 def test_dual_local_evidence_is_digest_only(tmp_path, monkeypatch):
@@ -806,7 +953,6 @@ def test_dual_local_explicit_escalation_still_requires_metered_gate(tmp_path, mo
         asr_engine.route_transcription(
             audio,
             strategy="dual-local",
-            disagreement_threshold=0.0,
             escalate_to_cloud=True,
             allow_metered_cloud=False,
         )
@@ -818,6 +964,15 @@ def test_golden_manifest_inside_repo_is_rejected(tmp_path, monkeypatch):
     monkeypatch.setattr(asr_engine, "REPO_ROOT", repo)
     manifest = _write_golden_manifest(repo, 1)
     with pytest.raises(ValueError, match="must remain outside"):
+        asr_engine.golden_manifest_summary(manifest)
+
+
+def test_golden_manifest_rejects_duplicate_audio_content(tmp_path):
+    manifest = _write_golden_manifest(tmp_path, 20)
+    first = tmp_path / "audio-0.wav"
+    duplicate = tmp_path / "audio-1.wav"
+    duplicate.write_bytes(first.read_bytes())
+    with pytest.raises(ValueError, match="duplicate audio content"):
         asr_engine.golden_manifest_summary(manifest)
 
 
@@ -841,6 +996,22 @@ def test_golden_quality_gate_requires_20_samples_and_category_coverage(tmp_path)
     assert full_summary["missing_quality_categories"] == []
     assert full_summary["quality_gate_eligible"] is True
     assert full_summary["automatic_default_change_allowed"] is False
+
+
+def test_evidence_writers_publish_private_files_atomically(tmp_path, monkeypatch):
+    state = tmp_path / "state"
+    monkeypatch.setattr(asr_engine, "STATE_DIR", state)
+    dual = {
+        "audio_sha256": "a" * 64,
+        "primary": {"transcript_sha256": "b" * 64},
+        "secondary": {"transcript_sha256": "c" * 64},
+        "policy_sha256": "d" * 64,
+    }
+    dual_path = asr_engine.write_dual_local_evidence(dual)
+    golden_path = asr_engine.write_golden_evidence({"manifest_sha256": "e" * 64})
+    assert oct(dual_path.stat().st_mode & 0o777) == "0o600"
+    assert oct(golden_path.stat().st_mode & 0o777) == "0o600"
+    assert not list(state.glob("*.tmp"))
 
 
 def test_golden_benchmark_evidence_contains_no_private_text_or_paths(tmp_path, monkeypatch):
