@@ -1,0 +1,17 @@
+{
+  "id": "asr-capability.v1",
+  "schema_version": 1,
+  "capability": "audio.transcribe",
+  "authority": "heimgewebe_asr_open_engine",
+  "authority_kind": "capability_authority",
+  "policy_resolution": "read_at_execution_time",
+  "entrypoint": "scripts/asr_engine.py",
+  "transcript_kind": "heimgewebe.asr-transcript",
+  "route_result_kind": "heimgewebe.asr-route-result",
+  "engine_policy": "manifest/asr-engine-policy.v1.json",
+  "transcript_contract": "manifest/asr-transcript-contract.v1.json",
+  "golden_corpus_contract": "manifest/asr-golden-corpus-contract.v1.json",
+  "consumer_engine_pinning_allowed": false,
+  "automatic_cloud_escalation_allowed": false,
+  "metered_cloud_requires_explicit_per_run_opt_in": true
+}
