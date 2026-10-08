@@ -42,6 +42,7 @@
       "model": "Systran/faster-whisper-large-v3",
       "adapter": "faster_whisper_cuda",
       "package": "faster-whisper==1.2.1",
+      "dependencies": ["av==18.1.0"],
       "type": "local",
       "license": "MIT",
       "gated": false,

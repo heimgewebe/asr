@@ -32,6 +32,7 @@ def test_policy_contract_and_default():
     default = policy["engines"]["faster-whisper"]
     assert default["model"] == "Systran/faster-whisper-large-v3"
     assert default["package"] == "faster-whisper==1.2.1"
+    assert default["dependencies"] == ["av==18.1.0"]
     assert default["role"] == "quality-default"
     assert default["decoding"] == {"vad_filter": True, "no_repeat_ngram_size": 3}
     assert policy["engines"]["qwen"]["role"] == "quality-fallback"
@@ -357,6 +358,26 @@ def test_package_probe_rejects_version_drift(
     assert asr_engine.package_probe(engine) == (False, "package-version-mismatch")
 
 
+def test_faster_whisper_probe_rejects_pyav19_api_drift(tmp_path, monkeypatch):
+    venv = tmp_path / "faster-whisper"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").write_text("", encoding="utf-8")
+    monkeypatch.setattr(asr_engine, "get_venv_path", lambda _engine: venv)
+    observed = []
+
+    def pyav19_failure(argv, **_kwargs):
+        observed.append(argv[2])
+        return asr_engine.subprocess.CompletedProcess(
+            argv, 1, stdout="", stderr="AssertionError: pyav-version-mismatch"
+        )
+
+    monkeypatch.setattr(asr_engine.subprocess, "run", pyav19_failure)
+    assert asr_engine.package_probe("faster-whisper") == (
+        False, "package-or-cuda-probe-failed"
+    )
+    assert "m.version('av') == '18.1.0'" in observed[0]
+
+
 def test_setup_is_explicit_and_uses_isolated_qwen_package(tmp_path, monkeypatch):
     cache = tmp_path / "cache"
     monkeypatch.setattr(asr_engine, "CACHE_DIR", cache)
@@ -542,6 +563,8 @@ def test_setup_faster_whisper_uses_policy_model(tmp_path, monkeypatch):
         if len(command) > 2 and command[1] == "-c" and "WhisperModel" in command[2]
     )
     assert asr_engine.load_policy()["engines"]["faster-whisper"]["model"] in download
+    commands = [call.args[0] for call in run.call_args_list]
+    assert any("av==18.1.0" in command for command in commands)
 
 
 def test_setup_parakeet_pins_package_and_model_revision(tmp_path, monkeypatch):

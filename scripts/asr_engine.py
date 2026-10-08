@@ -481,8 +481,20 @@ def package_probe(engine_name: str) -> tuple[bool, str]:
             f"print(m.version('{distribution}'))"
         )
     elif engine_name == "faster-whisper":
+        dependencies = engine_conf.get("dependencies")
+        if (
+            not isinstance(dependencies, list)
+            or len(dependencies) != 1
+            or not isinstance(dependencies[0], str)
+            or not dependencies[0].startswith("av==")
+        ):
+            return False, "pyav-pin-invalid"
+        pyav_version = dependencies[0].removeprefix("av==")
+        if not pyav_version or not all(part.isdigit() for part in pyav_version.split(".")):
+            return False, "pyav-pin-invalid"
         code = (
             "import importlib.metadata as m; import faster_whisper; import ctranslate2; "
+            f"assert m.version('av') == {pyav_version!r}, 'pyav-version-mismatch'; "
             "assert ctranslate2.get_cuda_device_count() > 0, 'ctranslate2-cuda-unavailable'; "
             f"print(m.version('{distribution}'))"
         )
@@ -590,6 +602,7 @@ def cmd_setup(args: argparse.Namespace) -> None:
                 "--python",
                 python_exec,
                 engine_conf["package"],
+                *engine_conf.get("dependencies", []),
             ],
             env=env,
             check=True,
